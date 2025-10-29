@@ -1,10 +1,9 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   View,
   Text,
   StyleSheet,
   TouchableOpacity,
-  Image,
   ScrollView,
   Alert,
   Animated,
@@ -12,30 +11,29 @@ import {
   Modal,
   TextInput,
 } from "react-native";
-import * as ImagePicker from "expo-image-picker";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
-import { LinearGradient } from "expo-linear-gradient";
-import { Picker } from '@react-native-picker/picker';
-import { supabase } from "../supabase"; // ✅ supabase client
+import { Picker } from "@react-native-picker/picker";
+import { supabase } from "../supabase";
 
 export default function ProfileScreen({ navigation }) {
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [profileImage, setProfileImage] = useState(null);
-  const scaleAnim = React.useRef(new Animated.Value(1)).current;
+  const scaleAnim = useRef(new Animated.Value(1)).current;
 
-  // 🔹 Modal states
   const [modalVisible, setModalVisible] = useState(false);
   const [editName, setEditName] = useState("");
   const [editRole, setEditRole] = useState("Staff");
   const [logoutModalVisible, setLogoutModalVisible] = useState(false);
 
-  // 🔹 Fetch profile data from Supabase
   useEffect(() => {
     const fetchProfile = async () => {
       setLoading(true);
 
-      const { data: { user }, error: userError } = await supabase.auth.getUser();
+      // Kunin ang current logged-in user
+      const {
+        data: { user },
+        error: userError,
+      } = await supabase.auth.getUser();
 
       if (userError || !user) {
         Alert.alert("⚠️ Session expired", "Please login again.");
@@ -43,18 +41,26 @@ export default function ProfileScreen({ navigation }) {
         return;
       }
 
+      // Kunin ang profile ng current user
       const { data, error } = await supabase
         .from("profiles")
-        .select("full_name, avatar_url")
+        .select("full_name, role")
         .eq("user_id", user.id)
         .single();
 
-      if (error) {
-        Alert.alert("⚠️ Error", error.message);
+      if (error || !data) {
+        // Fallback sa user_metadata kung wala pa sa DB
+        const nameFromMetadata = user.user_metadata?.full_name || "User";
+        setProfile({
+          email: user.email,
+          role: "Staff",
+          full_name: nameFromMetadata,
+        });
+        setEditName(nameFromMetadata);
       } else {
         setProfile({ ...data, email: user.email });
-        if (data?.avatar_url) setProfileImage(data.avatar_url);
-        setEditName(data?.full_name || "");
+        setEditName(data.full_name || user.user_metadata?.full_name || "User");
+        setEditRole(data.role || "Staff");
       }
 
       setLoading(false);
@@ -63,220 +69,133 @@ export default function ProfileScreen({ navigation }) {
     fetchProfile();
   }, []);
 
-  // 🔹 Upload profile image
-  const pickImage = async () => {
-    const permissionResult = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!permissionResult.granted) {
-      Alert.alert("Permission required", "Camera roll access is needed.");
-      return;
-    }
-
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      allowsEditing: true,
-      aspect: [1, 1],
-      quality: 0.8,
-    });
-
-    if (!result.canceled) {
-      const image = result.assets[0].uri;
-      const fileExt = image.split(".").pop();
-      const fileName = `${Date.now()}.${fileExt}`;
-      const filePath = `avatars/${fileName}`;
-
-      const response = await fetch(image);
-      const blob = await response.blob();
-
-      const { error: uploadError } = await supabase.storage
-        .from("avatars")
-        .upload(filePath, blob, { contentType: blob.type });
-
-      if (uploadError) {
-        Alert.alert("Upload Error", uploadError.message);
-        return;
-      }
-
-      const { data } = supabase.storage.from("avatars").getPublicUrl(filePath);
-      const publicUrl = data.publicUrl;
-
-      const { data: { user } } = await supabase.auth.getUser();
-
-      await supabase
-        .from("profiles")
-        .update({ avatar_url: publicUrl })
-        .eq("user_id", user.id);
-
-      setProfileImage(publicUrl);
-      Alert.alert("✅ Success", "Profile picture updated!");
-    }
+  // Helper to get initials
+  const getInitials = (name) => {
+    if (!name) return "U";
+    const names = name.trim().split(" ");
+    const initials = names.map((n) => n[0].toUpperCase()).join("");
+    return initials.slice(0, 2); // Max 2 letters
   };
 
   // Animated press effect
-  const onPressIn = () => {
+  const onPressIn = () =>
     Animated.spring(scaleAnim, { toValue: 0.97, useNativeDriver: true }).start();
-  };
-  const onPressOut = () => {
+  const onPressOut = () =>
     Animated.spring(scaleAnim, { toValue: 1, friction: 3, useNativeDriver: true }).start();
-  };
 
-  // 🔹 Logout function
   const performLogout = async () => {
     setLogoutModalVisible(false);
     await supabase.auth.signOut();
     navigation.replace("Auth");
   };
 
-  const handleChangePassword = () => {
-    navigation.navigate("ChangePassword");
-  };
-
-  const handleEditProfile = () => {
-    setModalVisible(true);
-  };
-
   const saveProfileChanges = async () => {
-    if (!editName) {
-      Alert.alert("⚠️ Name cannot be empty");
-      return;
-    }
+    if (!editName) return Alert.alert("⚠️ Name cannot be empty");
 
-    const { data: { user } } = await supabase.auth.getUser();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
     await supabase
       .from("profiles")
-      .update({ full_name: editName })
-      .eq("user_id", user.id);
+      .upsert({ user_id: user.id, full_name: editName, role: editRole });
 
-    setProfile(prev => ({
-      ...prev,
-      full_name: editName,
-      role: editRole, // local only
-    }));
-
+    // Update agad state para mag-refresh initials
+    setProfile((prev) => ({ ...prev, full_name: editName, role: editRole }));
     setModalVisible(false);
     Alert.alert("✅ Profile updated!");
   };
 
-  const bgColor = "#f5f6fa";
-  const cardColor = "#fff";
-  const textColor = "#333";
-  const subTextColor = "#777";
-
-  if (loading) {
+  if (loading)
     return (
       <View style={{ flex: 1, justifyContent: "center", alignItems: "center" }}>
-        <ActivityIndicator size="large" color="#ff7f50" />
+        <ActivityIndicator size="large" color="#FF0000" />
       </View>
     );
-  }
 
   return (
-    <ScrollView style={[styles.container, { backgroundColor: bgColor }]}>
-      {/* Header */}
-      <LinearGradient colors={["#ff7f50", "#ffb347"]} style={styles.header} />
-
-      {/* Avatar */}
+    <ScrollView style={styles.container}>
+      {/* Avatar with initials */}
       <View style={styles.avatarWrapper}>
-        <TouchableOpacity onPress={pickImage} activeOpacity={0.8}>
-          {profileImage ? (
-            <Image source={{ uri: profileImage }} style={styles.avatar} />
-          ) : (
-            <View style={styles.uploadBox}>
-              <MaterialCommunityIcons name="camera-plus" size={40} color="#ff7f50" />
-            </View>
-          )}
-        </TouchableOpacity>
+        <View style={styles.initialsBox}>
+          <Text style={styles.initialsText}>
+            {getInitials(profile?.full_name || editName)}
+          </Text>
+        </View>
       </View>
 
       {/* Name & Role */}
-      <Text style={[styles.name, { color: textColor }]}>{profile?.full_name || "Unnamed"}</Text>
-      <Text style={[styles.role, { color: subTextColor }]}>{profile?.role || "Staff"}</Text>
+      <Text style={styles.name}>{profile?.full_name || editName || "Unnamed"}</Text>
+      <Text style={styles.role}>{profile?.role || "Staff"}</Text>
 
       {/* Info Cards */}
       <View style={styles.infoContainer}>
-        <View style={[styles.infoCard, { backgroundColor: cardColor }]}>
-          <MaterialCommunityIcons name="email-outline" size={24} color="#ff7f50" />
-          <Text style={[styles.infoText, { color: textColor }]}>{profile?.email || "No email"}</Text>
+        <View style={styles.infoCard}>
+          <MaterialCommunityIcons name="email-outline" size={24} color="#FF0000" />
+          <Text style={styles.infoText}>{profile?.email || "No email"}</Text>
         </View>
-        <View style={[styles.infoCard, { backgroundColor: cardColor }]}>
-          <MaterialCommunityIcons name="briefcase-outline" size={24} color="#ff7f50" />
-          <Text style={[styles.infoText, { color: textColor }]}>{profile?.role || "Event Staff"}</Text>
+        <View style={styles.infoCard}>
+          <MaterialCommunityIcons name="briefcase-outline" size={24} color="#FF0000" />
+          <Text style={styles.infoText}>{profile?.role || "Event Staff"}</Text>
         </View>
       </View>
 
-      {/* Divider */}
       <View style={styles.divider} />
 
-      {/* Settings Section */}
-      <Text style={[styles.sectionTitle, { color: textColor }]}>Settings</Text>
+      {/* Settings */}
+      <Text style={styles.sectionTitle}>Settings</Text>
       <View style={styles.settingsContainer}>
-        {/* Change Password */}
         <TouchableOpacity
-          style={[styles.settingRow, { backgroundColor: cardColor }]}
-          onPress={handleChangePassword}
-          activeOpacity={0.7}
+          style={styles.settingRow}
+          onPress={() => navigation.navigate("ChangePassword")}
         >
-          <MaterialCommunityIcons name="lock-outline" size={24} color="#ff7f50" />
-          <Text style={[styles.settingText, { color: textColor }]}>Change Password</Text>
+          <MaterialCommunityIcons name="lock-outline" size={24} color="#FF0000" />
+          <Text style={styles.settingText}>Change Password</Text>
           <MaterialCommunityIcons name="chevron-right" size={24} color="#888" />
         </TouchableOpacity>
 
-        {/* Edit Profile */}
         <TouchableOpacity
-          style={[styles.settingRow, { backgroundColor: cardColor }]}
-          onPress={handleEditProfile}
-          activeOpacity={0.7}
+          style={styles.settingRow}
+          onPress={() => setModalVisible(true)}
         >
-          <MaterialCommunityIcons name="account-edit-outline" size={24} color="#ff7f50" />
-          <Text style={[styles.settingText, { color: textColor }]}>Edit Profile</Text>
+          <MaterialCommunityIcons name="account-edit-outline" size={24} color="#FF0000" />
+          <Text style={styles.settingText}>Edit Profile</Text>
           <MaterialCommunityIcons name="chevron-right" size={24} color="#888" />
         </TouchableOpacity>
       </View>
 
-      {/* Logout Button */}
+      {/* Logout */}
       <Animated.View style={{ transform: [{ scale: scaleAnim }] }}>
         <TouchableOpacity
           style={styles.logoutButton}
           onPress={() => setLogoutModalVisible(true)}
-          activeOpacity={0.8}
           onPressIn={onPressIn}
           onPressOut={onPressOut}
         >
-          <LinearGradient colors={["#ff7f50", "#ffb347"]} style={styles.logoutGradient}>
+          <View style={styles.logoutGradient}>
             <Text style={styles.logoutText}>Logout</Text>
-          </LinearGradient>
+          </View>
         </TouchableOpacity>
       </Animated.View>
 
-      {/* Edit Profile Modal */}
-      <Modal
-        animationType="slide"
-        transparent
-        visible={modalVisible}
-        onRequestClose={() => setModalVisible(false)}
-      >
+      {/* Edit Modal */}
+      <Modal animationType="slide" transparent visible={modalVisible}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <Text style={styles.modalTitle}>Edit Profile</Text>
-
             <TextInput
               placeholder="Full Name"
               value={editName}
               onChangeText={setEditName}
               style={styles.input}
             />
-
-            <View style={[styles.input, { padding: 0, justifyContent: 'center' }]}>
-              <Picker
-                selectedValue={editRole}
-                onValueChange={(itemValue) => setEditRole(itemValue)}
-              >
+            <View style={[styles.input, { padding: 0, justifyContent: "center" }]}>
+              <Picker selectedValue={editRole} onValueChange={setEditRole}>
                 <Picker.Item label="Staff" value="Staff" />
                 <Picker.Item label="Event Manager" value="Event Manager" />
                 <Picker.Item label="Admin" value="Admin" />
               </Picker>
             </View>
-
-
             <View style={styles.modalButtons}>
               <TouchableOpacity
                 onPress={() => setModalVisible(false)}
@@ -284,10 +203,9 @@ export default function ProfileScreen({ navigation }) {
               >
                 <Text>Cancel</Text>
               </TouchableOpacity>
-
               <TouchableOpacity
                 onPress={saveProfileChanges}
-                style={[styles.modalButton, { backgroundColor: "#ff7f50" }]}
+                style={[styles.modalButton, { backgroundColor: "#FF0000" }]}
               >
                 <Text style={{ color: "#fff" }}>Save</Text>
               </TouchableOpacity>
@@ -296,17 +214,14 @@ export default function ProfileScreen({ navigation }) {
         </View>
       </Modal>
 
-      {/* Logout Confirmation Modal */}
-      <Modal
-        animationType="fade"
-        transparent
-        visible={logoutModalVisible}
-        onRequestClose={() => setLogoutModalVisible(false)}
-      >
+      {/* Logout Modal */}
+      <Modal animationType="fade" transparent visible={logoutModalVisible}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <Text style={styles.modalTitle}>Confirm Logout</Text>
-            <Text style={{ marginBottom: 20 }}>Are you sure you want to logout?</Text>
+            <Text style={{ marginBottom: 20 }}>
+              Are you sure you want to logout?
+            </Text>
             <View style={styles.modalButtons}>
               <TouchableOpacity
                 onPress={() => setLogoutModalVisible(false)}
@@ -316,7 +231,7 @@ export default function ProfileScreen({ navigation }) {
               </TouchableOpacity>
               <TouchableOpacity
                 onPress={performLogout}
-                style={[styles.modalButton, { backgroundColor: "#ff7f50" }]}
+                style={[styles.modalButton, { backgroundColor: "#FF0000" }]}
               >
                 <Text style={{ color: "#fff" }}>Logout</Text>
               </TouchableOpacity>
@@ -328,48 +243,45 @@ export default function ProfileScreen({ navigation }) {
   );
 }
 
+
+
 const styles = StyleSheet.create({
-  container: { flex: 1 },
-  header: {
-    width: "100%",
-    height: 180,
-    marginTop: 70,
-    borderBottomLeftRadius: 40,
-    borderBottomRightRadius: 40,
-    elevation: 3,
-  },
+  container: { flex: 1, backgroundColor: "#f5f6fa" },
+
+  // Avatar
   avatarWrapper: {
-    marginTop: -90,
+    marginTop: 60,
     alignSelf: "center",
-    shadowColor: "#000",
-    shadowOpacity: 0.25,
-    shadowOffset: { width: 0, height: 5 },
-    shadowRadius: 8,
-    elevation: 6,
+    zIndex: 10,
   },
-  avatar: {
+  initialsBox: {
     width: 120,
     height: 120,
     borderRadius: 60,
-    borderWidth: 4,
-    borderColor: "#fff",
-  },
-  uploadBox: {
-    width: 120,
-    height: 120,
-    borderRadius: 60,
-    borderWidth: 2,
-    borderColor: "#ff7f50",
+    backgroundColor: "#FF0000",
     justifyContent: "center",
     alignItems: "center",
-    backgroundColor: "#fff",
+    shadowColor: "#000",
+    shadowOpacity: 0.2,
+    shadowOffset: { width: 0, height: 3 },
+    shadowRadius: 5,
+    elevation: 5,
+    marginTop: 70,
   },
+  initialsText: {
+    color: "#fff",
+    fontSize: 40,
+    fontWeight: "bold",
+  },
+
+  // Name & Role
   name: {
     fontSize: 22,
     fontWeight: "700",
     marginTop: 20,
     textAlign: "center",
     letterSpacing: 0.3,
+    color: "#222",
   },
   role: {
     fontSize: 15,
@@ -377,36 +289,53 @@ const styles = StyleSheet.create({
     marginBottom: 20,
     textAlign: "center",
     fontStyle: "italic",
+    color: "#777",
   },
-  infoContainer: { width: "85%", alignSelf: "center", marginBottom: 20 },
+
+  // Info cards
+  infoContainer: {
+    width: "90%",
+    alignSelf: "center",
+    marginBottom: 20,
+  },
   infoCard: {
     flexDirection: "row",
     alignItems: "center",
     borderRadius: 15,
     padding: 15,
     marginVertical: 6,
-    elevation: 2,
+    backgroundColor: "#fff",
     shadowColor: "#000",
-    shadowOpacity: 0.1,
+    shadowOpacity: 0.08,
     shadowOffset: { width: 0, height: 2 },
     shadowRadius: 4,
+    elevation: 3,
   },
-  infoText: { marginLeft: 15, fontSize: 16, fontWeight: "500" },
+  infoText: {
+    marginLeft: 15,
+    fontSize: 16,
+    fontWeight: "500",
+    color: "#333",
+  },
+
   divider: {
-    width: "85%",
+    width: "90%",
     height: 1,
     backgroundColor: "#ddd",
     alignSelf: "center",
     marginVertical: 10,
   },
+
+  // Sections
   sectionTitle: {
     fontSize: 18,
     fontWeight: "600",
     marginLeft: 30,
     marginBottom: 10,
+    color: "#222",
   },
   settingsContainer: {
-    width: "85%",
+    width: "90%",
     alignSelf: "center",
     marginBottom: 20,
   },
@@ -417,23 +346,27 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     padding: 15,
     marginVertical: 6,
-    elevation: 1,
+    backgroundColor: "#fff",
     shadowColor: "#000",
     shadowOpacity: 0.05,
     shadowOffset: { width: 0, height: 2 },
     shadowRadius: 3,
+    elevation: 2,
   },
-  settingText: { fontSize: 16, flex: 1, marginLeft: 15 },
-  logoutButton: {
-    marginTop: 20,
-    width: "85%",
-    alignSelf: "center",
-    borderRadius: 12,
+  settingText: {
+    fontSize: 16,
+    flex: 1,
+    marginLeft: 15,
+    color: "#333",
   },
+
+  // Logout
+  logoutButton: { marginTop: 25, width: "90%", alignSelf: "center", borderRadius: 12 },
   logoutGradient: {
-    paddingVertical: 14,
+    paddingVertical: 15,
     borderRadius: 12,
     alignItems: "center",
+    backgroundColor: "red",
   },
   logoutText: {
     color: "#fff",
@@ -441,6 +374,8 @@ const styles = StyleSheet.create({
     fontSize: 16,
     letterSpacing: 0.5,
   },
+
+  // Modals
   modalOverlay: {
     flex: 1,
     justifyContent: "center",
@@ -453,13 +388,15 @@ const styles = StyleSheet.create({
     borderRadius: 15,
     padding: 20,
   },
-  modalTitle: { fontSize: 18, fontWeight: "bold", marginBottom: 15 },
+  modalTitle: { fontSize: 18, fontWeight: "bold", marginBottom: 15, color: "#222" },
   input: {
     borderWidth: 1,
     borderColor: "#ccc",
     borderRadius: 10,
-    padding: 10,
+    padding: 12,
     marginBottom: 15,
+    fontSize: 15,
+    color: "#000000ff",
   },
   modalButtons: { flexDirection: "row", justifyContent: "space-between" },
   modalButton: {

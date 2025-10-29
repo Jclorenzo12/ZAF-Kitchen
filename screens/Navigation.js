@@ -19,7 +19,7 @@ export default function Navigation() {
           else if (route.name === "Profile") iconName = "account-circle";
           return <Icon name={iconName} size={size} color={color} />;
         },
-        tabBarActiveTintColor: "#c45308ff",
+        tabBarActiveTintColor: "#FF0000",
         tabBarInactiveTintColor: "black",
         tabBarStyle: { height: 90 },
         tabBarLabelStyle: { fontSize: 12 },
